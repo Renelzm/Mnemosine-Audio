@@ -28,14 +28,14 @@ function download(req, res) {
     '--audio-format', 'mp3',
     '--audio-quality', '0',
     '--no-playlist',
+    '--paths', '/tmp',
     '-o', '-',
     url,
   ]);
 
-  res.setHeader('Content-Type', 'audio/mpeg');
-  res.setHeader('Content-Disposition', 'attachment; filename="audio.mp3"');
+  const chunks = [];
 
-  ytdlp.stdout.pipe(res);
+  ytdlp.stdout.on('data', (chunk) => chunks.push(chunk));
 
   ytdlp.stderr.on('data', (data) => {
     console.error(`[yt-dlp] ${data.toString().trim()}`);
@@ -49,10 +49,25 @@ function download(req, res) {
   });
 
   ytdlp.on('close', (code) => {
-    console.log(`[${new Date().toISOString()}] Descarga completada. Código de salida: ${code}`);
-    if (code !== 0 && !res.headersSent) {
-      res.status(500).json({ error: `yt-dlp terminó con código ${code}` });
+    console.log(`[${new Date().toISOString()}] Descarga completada. Código: ${code}, bytes: ${chunks.reduce((n, c) => n + c.length, 0)}`);
+
+    if (code !== 0) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: `yt-dlp terminó con código ${code}` });
+      }
+      return;
     }
+
+    const buffer = Buffer.concat(chunks);
+
+    if (buffer.length === 0) {
+      return res.status(500).json({ error: 'yt-dlp no generó audio. Revisa la URL.' });
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', 'attachment; filename="audio.mp3"');
+    res.setHeader('Content-Length', buffer.length);
+    res.end(buffer);
   });
 
   res.on('close', () => {
@@ -64,7 +79,7 @@ function download(req, res) {
 }
 
 function health(_req, res) {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.2' });
 }
 
 module.exports = { download, health };
