@@ -4,8 +4,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     python3 \
     python3-pip \
+    curl \
+    unzip \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
+
+# yt-dlp necesita un JS runtime para resolver los retos de YouTube. "node" NO sirve como
+# JS challenge provider (queda "unavailable" aunque el binario exista); el que sí funciona
+# es deno. Sin esto, YouTube fuerza el bloqueo "Sign in to confirm you're not a bot" incluso
+# con cookies válidas.
+RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y \
+  && ln -s /root/.deno/bin/deno /usr/local/bin/deno \
+  && deno --version
 
 WORKDIR /app
 

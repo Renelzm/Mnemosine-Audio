@@ -117,15 +117,39 @@ Causa: yt-dlp intenta **reescribir** el cookies.txt al cerrar (para persistir co
 
 **Verificado con Docker real:** mismo test (`PFZh58z32m0`) con mount `:ro` → antes: HTTP 500 (`yt-dlp terminó con código 1`) a pesar de tener el audio completo; después del fix: HTTP 200, 32.7 MB, mp3 válido, y sin quedar temporales huérfanos en `/tmp` del contenedor.
 
+## ⚠️ Primer redeploy a producción (2026-08-20): reveló 2 problemas más
+
+### Coolify puede reusar una imagen vieja sin avisar ("Build step skipped")
+
+El primer redeploy después del commit mostró en el log: `No build configuration changed & image found ... Build step skipped.` — sin ninguna línea de `apt-get`/`pip install`. Probando el endpoint justo después, la respuesta fue instantánea (0.09s) con `"No se pudo iniciar yt-dlp. Verifica que esté instalado."` — el contenedor corriendo no tenía yt-dlp, es decir, Coolify reusó una imagen vieja/incompleta en vez de compilar el Dockerfile nuevo.
+
+**Solución:** forzar **Force Rebuild** (sin caché) en Coolify. Con eso sí compiló de verdad (~70s, con todas las líneas de instalación visibles en el log). **Lección: cuando cambie el Dockerfile, no basta con Redeploy normal — hay que forzar rebuild sin caché para asegurar que Coolify realmente reconstruya.**
+
+### Bug real encontrado ya en producción: `--js-runtimes node` no funciona, hacía falta `deno`
+
+Con la imagen ya reconstruida de verdad, `PFZh58z32m0` seguía fallando (`yt-dlp terminó con código 1`, esta vez en ~1.7s — sí corrió pero falló rápido). El log de runtime mostró la causa:
+```
+WARNING: [youtube] The provided YouTube account cookies are no longer valid...
+WARNING: [youtube] No supported JavaScript runtime could be found. Only deno is enabled by default...
+ERROR: [youtube] PFZh58z32m0: Sign in to confirm you're not a bot...
+```
+El código forzaba `--js-runtimes node:/usr/local/bin/node`, pero **`node` no es un JS challenge provider funcional en yt-dlp** (aparece como "unavailable" aunque el binario exista — confirmado también en yt-dlp local). El único que sirve es `deno`, que nunca se instaló en la imagen Docker (era justo el pendiente anotado desde el inicio de este documento). Sin un JS runtime que resuelva el reto de YouTube, cae en el bloqueo de bot incluso con cookies — y por eso también reaparecía el warning de "cookies no longer valid" (yt-dlp toma un camino degradado sin el JS runtime).
+
+**Fix:**
+- `Dockerfile` — se agrega `curl`/`unzip` y se instala deno (`https://deno.land/install.sh`), symlink a `/usr/local/bin/deno`.
+- `src/controllers/audio.controller.js` — cambia `--js-runtimes node:/usr/local/bin/node` → `--js-runtimes deno:/usr/local/bin/deno`.
+
+**Verificado:** local (yt-dlp directo con deno) y con Docker real (build + run, mount `:ro`) contra `PFZh58z32m0`: sin warning de cookies inválidas, sin warning de JS runtime, sin bloqueo de bot. HTTP 200, mp3 válido de 32.7 MB.
+
 ### Listo para redeploy
 
-Con estos 3 fixes (cookies wireadas, mp3 real via ffmpeg, yt-dlp siempre actualizado + a prueba de mount read-only), todo quedó verificado con Docker real corriendo localmente. Pendiente: commitear y redeploy en Coolify, y repetir la prueba con `PFZh58z32m0` ya en producción para confirmar que la IP de datacenter de Oracle tampoco dispara el bloqueo.
+Con todos estos fixes (cookies wireadas, mp3 real vía ffmpeg, yt-dlp siempre actualizado, a prueba de mount read-only, y deno instalado), todo quedó verificado con Docker real corriendo localmente. Pendiente: commitear y hacer **Force Rebuild sin caché** en Coolify (no un Redeploy normal), y repetir la prueba con `PFZh58z32m0` ya en producción.
 
 ### Pasos para el redeploy a producción
 
 1. Commitear estos cambios de código (**nunca** el `www.youtube.com_cookies.txt`, ya está en `.gitignore`).
 2. Confirmar en Coolify que el File Mount sigue en `/data/cookies/cookies.txt` con un cookies.txt fresco (re-exportar si tiene más de unos días).
-3. Redeploy.
+3. **Force Rebuild sin caché** (no un Redeploy normal — el Dockerfile cambió y Coolify puede reusar una imagen vieja si no se fuerza).
 4. Probar en el Terminal del contenedor: `cat /data/cookies/cookies.txt` (confirmar que el mount sigue ahí) y luego pegarle al endpoint real con el video que antes fallaba (`PFZh58z32m0`).
 5. Revisar logs de la app: debe aparecer `[yt-dlp] Usando cookies de sesión: /data/cookies/cookies.txt`.
 

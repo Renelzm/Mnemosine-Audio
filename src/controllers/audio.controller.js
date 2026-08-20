@@ -54,7 +54,7 @@ function download(req, res) {
   const ytdlpArgs = [
     '-f', 'bestaudio',
     '--no-playlist',
-    '--js-runtimes', 'node:/usr/local/bin/node',
+    '--js-runtimes', 'deno:/usr/local/bin/deno',
     ...(hasCookies ? ['--cookies', workingCookiesPath] : []),
     '-o', '-',
     url,
