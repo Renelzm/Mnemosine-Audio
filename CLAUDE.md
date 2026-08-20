@@ -32,7 +32,7 @@ node -e "const fs=require('fs');fs.writeFileSync('p.json',JSON.stringify({url:'h
 curl -s -X POST localhost:8080/download -H 'Content-Type: application/json' -d @p.json -o out.mp3
 ```
 
-Env vars: `PORT`, `COOKIES_PATH`, `REMOTE_COMPONENTS`, `PLAYER_CLIENTS`, `JS_RUNTIME`, `API_TOKEN` (si se define, `/download` exige el header `X-Api-Token`). Todas tienen default en `src/config/index.js`; ninguna es obligatoria.
+Env vars: `PORT`, `COOKIES_PATH`, `REMOTE_COMPONENTS`, `PLAYER_CLIENTS`, `JS_RUNTIME`, `POT_PORT`, `POT_BASE_URL` (vacía = desactiva PO tokens), `API_TOKEN` (si se define, `/download` exige el header `X-Api-Token`). Todas tienen default en `src/config/index.js`; ninguna es obligatoria.
 
 `PFZh58z32m0` es el video de regresión: es el que dispara los bloqueos anti-bot de YouTube. Un video "fácil" como `jNQXAC9IVRw` pasa incluso con la configuración rota, así que no sirve para validar cambios en yt-dlp/cookies/deno.
 
@@ -57,10 +57,24 @@ yt-dlp necesita varias cosas para que YouTube no responda "Sign in to confirm yo
 
 1. **`deno` como JS runtime.** `--js-runtimes node:...` **no funciona** — node no es un JS challenge provider válido en yt-dlp (aparece como "unavailable" aunque el binario exista). El controller pasa `--js-runtimes deno:/usr/local/bin/deno`; el Dockerfile instala deno y hace el symlink.
 2. **El solver EJS.** Sin él, deno corre pero no hay script que resuelva el reto JS: yt-dlp deja solo miniaturas y falla con `Requested format is not available`. El ejecutable oficial de Windows lo trae empaquetado, `pip install yt-dlp` no. Se cubre por dos lados: el paquete pip `yt-dlp-ejs` (local) y `--remote-components ejs:github` (fallback en runtime). En producción el pip solo no bastó — el log mostraba `Remote components ... were skipped`.
-3. **Evitar el reto JS de entrada.** `--extractor-args youtube:player_client=default,visionos` (env `PLAYER_CLIENTS`): el cliente `visionos` no requiere reto JS ni PO tokens. Es lo que hace que yt-dlp funcione en local sin deno instalado, y el camino más barato para esquivar los puntos 1 y 2.
-4. **Cookies de sesión frescas** (ver abajo). El bloqueo se dispara por IP de datacenter, así que **no se reproduce probando desde una IP residencial**: en local, cookies muertas listan formatos sin problema; desde Oracle las mismas cookies dan bot check.
+3. **Evitar el reto JS de entrada.** El cliente `visionos` no requiere reto JS ni PO tokens; es lo que hace que yt-dlp funcione en local sin deno instalado. Se fija con `PLAYER_CLIENTS=default,visionos`, pero **hoy va vacío por defecto** para no anular los PO tokens (ver abajo).
+4. **PO tokens o cookies frescas.** El bloqueo se dispara por IP de datacenter, y **no se reproduce desde una IP residencial**: en local, cookies muertas listan formatos sin problema; desde Oracle las mismas cookies dan bot check. Probado el 2026-08-20 con el flag `noCookies`: la IP bloquea **con cookies muertas y sin cookies igual**, así que no hay configuración de yt-dlp que lo esquive sin credenciales.
 
 En el Dockerfile, `pip3 install -U yt-dlp yt-dlp-ejs` va **después** de `COPY . .` a propósito: así la capa se invalida en cada commit y cada redeploy jala la versión más reciente. Si se mueve antes, Docker la cachea y el contenedor puede quedarse con un yt-dlp viejo que YouTube ya bloquea.
+
+## PO tokens (bgutil)
+
+Los PO tokens hacen que el tráfico parezca legítimo sin cookies de una cuenta real — la única salida que no depende de re-exportar credenciales ni arriesga suspensión de la cuenta por ToS. **No garantizan** evitar el bot check; el propio proyecto lo advierte.
+
+Son dos mitades y `/diag` las reporta por separado en `poTokens`, porque si el plugin está y el server no, yt-dlp cae de vuelta a cookies **sin que el 200 lo delate**:
+
+- **Server**: se copia ya compilado desde la imagen oficial `brainicism/bgutil-ytdlp-pot-provider:1.3.1-node` en un stage del Dockerfile. Se copia en vez de compilarse porque `canvas` en arm64 exigiría cairo/pango dev y toolchain de C++. Corre bajo Node 20 aunque esa imagen traiga Node 25 porque `canvas` 3.x es **N-API** (`napi_versions: [7]`), cuyo ABI es estable entre versiones de Node.
+- **Plugin**: pip `bgutil-ytdlp-pot-provider`, **pineado a la misma versión del server** (1.3.1). El protocolo entre ambos no está versionado y una mezcla de versiones falla en silencio.
+
+`docker-entrypoint.sh` levanta el server en loopback (`POT_PORT`, default 4416) y luego hace `exec` de la app. Va en el **mismo contenedor** a propósito: un sidecar obligaría a migrar el build pack de Coolify a Docker Compose, que re-deriva dominio, puertos y File Mounts de un servicio que ya funciona. Si el server no arranca, la app sigue sirviendo y cae a cookies.
+
+`PLAYER_CLIENTS` está **vacío por defecto** desde que existe el provider: los clientes por defecto de yt-dlp son los que consumen PO tokens. Pinear `visionos` (no requiere reto JS ni PO tokens) es el plan B si el provider falla.
+
 
 ## Contrato de la API
 
@@ -69,8 +83,12 @@ En el Dockerfile, `pip3 install -U yt-dlp yt-dlp-ejs` va **después** de `COPY .
 ```jsonc
 { "url": "https://...",          // requerido
   "cookiesB64": "IyBOZXRz...",   // opcional, recomendado: cookies.txt en base64
-  "cookies": "# Netscape..." }   // opcional, alternativa en texto plano
+  "cookies": "# Netscape...",    // opcional, alternativa en texto plano
+  "noCookies": true,             // diagnóstico: ignora TODAS las fuentes de cookies
+  "playerClients": "default" }   // diagnóstico: pisa PLAYER_CLIENTS en este request
 ```
+
+Los dos últimos son para diagnóstico: cada redeploy es ciego y tarda minutos, así que comparar configuraciones contra la misma imagen desde el cliente ahorra ciclos completos.
 
 ```jsonc
 { "ok": false, "code": "BOT_CHECK", "error": "...", "hint": "...",

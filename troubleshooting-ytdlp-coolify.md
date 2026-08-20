@@ -235,3 +235,65 @@ El normalizador **re-tabula** el archivo: el formato Netscape exige TABs y al vi
 - **Las cookies siguen siendo el punto frágil.** Rotan porque el navegador que las exportó siguió activo. Procedimiento para que duren: ventana privada → login → dejar una sola pestaña → ir a `youtube.com/robots.txt` → exportar → **cerrar la ventana sin logout**. Usar el mismo archivo desde dos IPs (PC + server) también las mata más rápido.
 - **Solución de fondo pendiente:** provider de PO tokens (`bgutil-ytdlp-pot-provider`) como sidecar. Permite descargar desde IP de datacenter **sin cookies de cuenta**, lo que elimina de raíz la rotación y el riesgo de ToS/suspensión de la cuenta personal.
 - **El endpoint es HTTP plano y sin auth.** Mandar cookies de sesión en el body sobre `http://` las expone en claro, y hoy cualquiera que conozca la URL puede descargar usando la cuenta de YouTube del usuario. Activar HTTPS en Coolify y definir `API_TOKEN`.
+
+---
+
+## 2026-08-20 (noche): PO tokens (bgutil) — instalados y funcionando, pero la IP sigue bloqueada
+
+Decisión del usuario: ir por la solución que no necesita cookies.
+
+### Diagnóstico previo que la justificó
+
+Con el flag `noCookies: true` se probó que la IP de Oracle recibe `Sign in to confirm you're not a bot`
+**tanto con cookies muertas como sin cookies del todo**, con deno + yt-dlp-ejs + `visionos` todos verdes.
+No hay configuración de yt-dlp que esquive el bloqueo sin credenciales: o cookies de cuenta real, o PO tokens.
+
+### Cómo se armó
+
+Un solo contenedor, sin sidecar. Un stage del Dockerfile copia el server bgutil **ya compilado**
+desde su imagen oficial (`brainicism/bgutil-ytdlp-pot-provider:1.3.1-node`, que publica arm64) y
+`docker-entrypoint.sh` lo levanta en loopback antes de hacer `exec` de la app.
+
+Tres decisiones que evitaron trabajo perdido:
+
+- **Copiar en vez de compilar.** Compilar el server exige `canvas`, que en arm64 pide cairo/pango dev
+  y toolchain de C++.
+- **No hubo que cambiar la imagen base.** La imagen del provider trae Node 25 y la nuestra Node 20, lo
+  que normalmente rompería el módulo nativo — pero `canvas` 3.x declara `napi_versions: [7]`, o sea
+  **N-API, de ABI estable entre versiones de Node**. Verificado en el registry de npm antes de escribir
+  nada, lo que ahorró migrar la base a Node 25 (que además ya es EOL).
+- **Mismo contenedor, no Compose.** Un sidecar obligaría a migrar el build pack de Coolify a Docker
+  Compose, que re-deriva dominio, puertos y File Mounts de un servicio que ya funcionaba.
+
+El plugin pip se pinea a la **misma versión** del server (1.3.1): el protocolo entre ambos no está
+versionado y una mezcla de versiones falla en silencio.
+
+### Verificado
+
+`GET /diag` reporta las dos mitades por separado — `plugin: 1.3.1` y
+`server: {"server_uptime":51.2,"version":"1.3.1"}`. Ambas arriba y coincidiendo.
+
+### Resultado: no alcanzó
+
+`PFZh58z32m0` sin cookies sigue dando `401 BOT_CHECK`. Se barrieron los clientes que consumen PO
+tokens (`web`, `mweb`, `web_safari`, `tv`, `web_embedded`) con el override `playerClients` por
+request: los cinco fallan igual, en 1.5–2s. El propio README de bgutil ya lo advierte —
+*"Providing a PO token does not guarantee bypassing 403 errors or bot checks"*.
+
+Se agregó el flag `verbose: true`, que mete `-v` a yt-dlp y devuelve el stderr completo en
+`verboseLog`, porque `summarize()` solo conserva líneas ERROR/WARNING y las informativas del plugin
+(las que dicen si el token se minteó) eran invisibles desde el cliente.
+
+### Lo que queda por determinar
+
+**Si cookies frescas funcionan desde esta IP.** Es la bifurcación que decide todo y no se puede
+resolver sin que el usuario exporte cookies nuevas:
+
+- **Si funcionan** → el camino es cookies (con los PO tokens ya puestos ayudando), y el trabajo hecho
+  en n8n (Data Table `Config` + `cookiesB64` en el body) es la forma de mantenerlas frescas sin redeploy.
+- **Si NO funcionan** → el rango de IP de Oracle está duro y ninguna credencial lo salva. La salida
+  entonces es cambiar la ruta de salida del tráfico: proxy residencial, o mover el servicio a otro
+  proveedor/IP.
+
+Nada de esto se puede validar desde la PC del usuario: desde IP residencial hasta las cookies muertas
+descargan bien.
