@@ -7,3 +7,7 @@ node_modules
 cookies.txt
 *cookies*.txt
 /cookies/
+
+# Salidas de scripts/probar-cookies.ps1
+audio-prueba.mp3
+diagnostico-ytdlp.log
