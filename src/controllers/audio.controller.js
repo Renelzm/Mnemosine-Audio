@@ -4,7 +4,7 @@ const { allowedDomains, cookiesPath, remoteComponents, playerClients, potBaseUrl
 const { resolveCookies } = require('../lib/cookies');
 const { classify, summarize } = require('../lib/ytdlp-errors');
 
-const VERSION = '2.1';
+const VERSION = '2.2';
 
 function isAllowedUrl(url) {
   try {
@@ -58,7 +58,13 @@ function download(req, res) {
   // pero se pasa explicito para que el valor real quede visible en los logs y en /diag.
   if (potBaseUrl) extractorArgs.push(`youtubepot-bgutilhttp:base_url=${potBaseUrl}`);
 
+  // Diagnostico: -v es la unica forma de ver si los providers de PO token se cargaron y si
+  // el token se llego a mintear. summarize() solo guarda lineas ERROR/WARNING, asi que sin
+  // esto las lineas informativas del plugin (las que dicen si funciona) son invisibles.
+  const verbose = req.body.verbose === true;
+
   const ytdlpArgs = [
+    ...(verbose ? ['-v'] : []),
     '-f', 'bestaudio/best',
     '--no-playlist',
     '--no-progress',
@@ -150,6 +156,7 @@ function download(req, res) {
         refreshCookies: verdict.refreshCookies,
         cookiesSource: cookies.source,
         detail: summarize(ytdlpStderr),
+        ...(verbose ? { verboseLog: ytdlpStderr.slice(-12000) } : {}),
       });
     }
 
