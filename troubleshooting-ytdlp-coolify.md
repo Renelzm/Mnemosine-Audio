@@ -284,6 +284,31 @@ Se agregó el flag `verbose: true`, que mete `-v` a yt-dlp y devuelve el stderr 
 `verboseLog`, porque `summarize()` solo conserva líneas ERROR/WARNING y las informativas del plugin
 (las que dicen si el token se minteó) eran invisibles desde el cliente.
 
+### Evidencia definitiva: el bloqueo es `LOGIN_REQUIRED`, no falta de PO token
+
+Con `verbose: true` y el cliente `web` forzado, el log muestra la causa exacta:
+
+```
+[debug] [youtube] [pot] PO Token Providers: bgutil:http-1.3.1 (external), ...
+[youtube] PFZh58z32m0: Downloading webpage
+[debug] [youtube] PFZh58z32m0: web player response playability status: LOGIN_REQUIRED
+ERROR: [youtube] PFZh58z32m0: Sign in to confirm you're not a bot.
+```
+
+Dos cosas que cierran el caso:
+
+1. El provider **sí está disponible** (`bgutil:http-1.3.1 (external)`, sin el `unavailable` que sí
+   llevan los providers de script). La instalación es correcta.
+2. yt-dlp **nunca llegó a pedir un PO token**. YouTube rechaza en la etapa de *playability* con
+   `LOGIN_REQUIRED`, que ocurre **antes** de que los formatos existan — y los PO tokens (GVS) sirven
+   justo para acceder a formatos. Son la herramienta equivocada para este modo de fallo.
+
+**Conclusión: desde esta IP las cookies de una cuenta autenticada son obligatorias.** Ninguna
+configuración de yt-dlp, cliente, runtime JS ni PO token lo evita.
+
+Los PO tokens se dejan instalados de todos modos: no estorban y sí ayudan contra los 403 en las URLs
+de formato una vez que la sesión está autenticada.
+
 ### Lo que queda por determinar
 
 **Si cookies frescas funcionan desde esta IP.** Es la bifurcación que decide todo y no se puede
