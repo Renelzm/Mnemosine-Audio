@@ -12,10 +12,16 @@ module.exports = {
   // El paquete pip yt-dlp-ejs cubre el mismo hueco de forma local; esto es el cinturón extra.
   remoteComponents: process.env.REMOTE_COMPONENTS || 'ejs:github',
 
-  // Clientes de YouTube a probar, en orden. visionos/tv_simply no requieren resolver el reto JS
-  // ni PO tokens, así que suelen pasar donde web/tv fallan. Vaciar la env var para dejar
-  // que yt-dlp decida solo.
-  playerClients: process.env.PLAYER_CLIENTS ?? 'default,visionos',
+  // Clientes de YouTube a forzar. Por defecto VACIO = que yt-dlp elija: sus clientes por defecto
+  // son los que consumen PO tokens, y con el provider corriendo esa es la ruta buena. Pinear
+  // visionos aqui (no requiere reto JS ni PO tokens) es el plan B si el provider falla.
+  playerClients: process.env.PLAYER_CLIENTS ?? '',
+
+  // Provider de PO tokens (bgutil) que el entrypoint levanta en el mismo contenedor. Los PO
+  // tokens hacen que el trafico desde una IP de datacenter parezca legitimo, que es lo unico
+  // que puede evitar el "Sign in to confirm you're not a bot" sin cookies de una cuenta real.
+  // Vaciar la env var para desactivar el plugin y volver a depender solo de cookies.
+  potBaseUrl: process.env.POT_BASE_URL ?? `http://127.0.0.1:${process.env.POT_PORT || 4416}`,
 
   jsRuntime: process.env.JS_RUNTIME || 'deno:/usr/local/bin/deno',
 

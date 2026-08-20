@@ -1,10 +1,10 @@
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
-const { allowedDomains, cookiesPath, remoteComponents, playerClients, jsRuntime, apiToken } = require('../config');
+const { allowedDomains, cookiesPath, remoteComponents, playerClients, potBaseUrl, jsRuntime, apiToken } = require('../config');
 const { resolveCookies } = require('../lib/cookies');
 const { classify, summarize } = require('../lib/ytdlp-errors');
 
-const VERSION = '2.0';
+const VERSION = '2.1';
 
 function isAllowedUrl(url) {
   try {
@@ -48,6 +48,16 @@ function download(req, res) {
 
   console.log(`[${new Date().toISOString()}] Descargando: ${url} | cookies: ${cookies.source} (${cookies.count})`);
 
+  // Override por request, solo para diagnostico: cada redeploy es ciego y lento, asi que poder
+  // comparar clientes contra la misma imagen desde el cliente ahorra ciclos completos de deploy.
+  const clients = typeof req.body.playerClients === 'string' ? req.body.playerClients : playerClients;
+
+  const extractorArgs = [];
+  if (clients) extractorArgs.push(`youtube:player_client=${clients}`);
+  // El plugin bgutil pide el token al provider local; sin este arg usa su default (mismo puerto),
+  // pero se pasa explicito para que el valor real quede visible en los logs y en /diag.
+  if (potBaseUrl) extractorArgs.push(`youtubepot-bgutilhttp:base_url=${potBaseUrl}`);
+
   const ytdlpArgs = [
     '-f', 'bestaudio/best',
     '--no-playlist',
@@ -55,7 +65,7 @@ function download(req, res) {
     '--socket-timeout', '30',
     '--js-runtimes', jsRuntime,
     ...(remoteComponents ? ['--remote-components', remoteComponents] : []),
-    ...(playerClients ? ['--extractor-args', `youtube:player_client=${playerClients}`] : []),
+    ...extractorArgs.flatMap((a) => ['--extractor-args', a]),
     ...(cookies.path ? ['--cookies', cookies.path] : []),
     '-o', '-',
     url,
@@ -193,6 +203,22 @@ function probe(cmd, args) {
   });
 }
 
+/** Salud del provider de PO tokens que levanta el entrypoint dentro del mismo contenedor. */
+async function pingPot() {
+  if (!potBaseUrl) return { ok: false, error: 'desactivado (POT_BASE_URL vacio)' };
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    const r = await fetch(`${potBaseUrl}/ping`, { signal: ctrl.signal });
+    clearTimeout(t);
+    const body = await r.text();
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+    return { ok: true, out: body.trim().slice(0, 300) };
+  } catch (err) {
+    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : err.message };
+  }
+}
+
 /**
  * Radiografia del contenedor que esta corriendo AHORA MISMO.
  *
@@ -202,11 +228,13 @@ function probe(cmd, args) {
 async function diag(_req, res) {
   const denoBin = jsRuntime.includes(':') ? jsRuntime.slice(jsRuntime.indexOf(':') + 1) : 'deno';
 
-  const [ytdlp, deno, ffmpeg, ejs] = await Promise.all([
+  const [ytdlp, deno, ffmpeg, ejs, potPlugin, potServer] = await Promise.all([
     probe('yt-dlp', ['--version']),
     probe(denoBin, ['--version']),
     probe('ffmpeg', ['-version']),
     probe('python3', ['-c', 'import importlib.metadata as m; print(m.version("yt-dlp-ejs"))']),
+    probe('python3', ['-c', 'import importlib.metadata as m; print(m.version("bgutil-ytdlp-pot-provider"))']),
+    pingPot(),
   ]);
 
   let mountedCookies;
@@ -238,6 +266,9 @@ async function diag(_req, res) {
     deno,
     ffmpeg,
     ytdlpEjs: ejs,
+    // Las dos mitades del sistema de PO tokens: el plugin de yt-dlp y el server que lo alimenta.
+    // Si el plugin esta y el server no, yt-dlp cae de vuelta a cookies sin avisar en el 200.
+    poTokens: { plugin: potPlugin, server: potServer, baseUrl: potBaseUrl || null },
     config: { remoteComponents, playerClients, jsRuntime, authRequired: Boolean(apiToken) },
     mountedCookies,
   });

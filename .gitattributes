@@ -1,0 +1,4 @@
+# El entrypoint corre en Linux: si git lo checkoutea con CRLF el shebang truena con
+# "no such file or directory". Se fuerza LF sin importar core.autocrlf del cliente.
+*.sh text eol=lf
+Dockerfile text eol=lf
