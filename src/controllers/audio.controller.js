@@ -1,5 +1,8 @@
 const { spawn } = require('child_process');
-const { allowedDomains } = require('../config');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { allowedDomains, cookiesPath } = require('../config');
 
 function isAllowedUrl(url) {
   try {
@@ -23,46 +26,113 @@ function download(req, res) {
 
   console.log(`[${new Date().toISOString()}] Descargando audio de: ${url}`);
 
-  const ytdlp = spawn('yt-dlp', [
-    '-x',
-    '--audio-format', 'mp3',
-    '--audio-quality', '0',
+  const hasCookies = fs.existsSync(cookiesPath);
+
+  // yt-dlp intenta reescribir el cookies.txt al cerrar (para persistir cookies rotadas).
+  // El File Mount de Coolify puede ser de solo lectura, y aunque no lo sea, no queremos que
+  // yt-dlp modifique el archivo "fuente de verdad" configurado ahí. Por eso se usa una copia
+  // temporal y escribible por request en vez de apuntar directo al cookiesPath montado.
+  let workingCookiesPath = null;
+  if (hasCookies) {
+    workingCookiesPath = path.join(os.tmpdir(), `cookies-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+    fs.copyFileSync(cookiesPath, workingCookiesPath);
+  }
+
+  console.log(hasCookies
+    ? `[yt-dlp] Usando cookies de sesión: ${cookiesPath}`
+    : `[yt-dlp] Sin cookies (no se encontró ${cookiesPath}); YouTube puede bloquear la descarga`);
+
+  const cleanupWorkingCookies = () => {
+    if (workingCookiesPath) {
+      fs.unlink(workingCookiesPath, () => {});
+    }
+  };
+
+  // yt-dlp solo extrae el mejor audio original (opus/webm, etc.) y lo manda por stdout.
+  // La conversión real a mp3 la hace ffmpeg en un segundo proceso encadenado: al mandar
+  // a stdout ('-o -'), el postprocesador de yt-dlp (-x/--audio-format) no se aplica.
+  const ytdlpArgs = [
+    '-f', 'bestaudio',
     '--no-playlist',
-    '--js-runtimes', 'nodejs',
-    '--paths', '/tmp',
+    '--js-runtimes', 'node:/usr/local/bin/node',
+    ...(hasCookies ? ['--cookies', workingCookiesPath] : []),
     '-o', '-',
     url,
-  ]);
+  ];
 
-  const chunks = [];
+  const ffmpegArgs = [
+    '-loglevel', 'error',
+    '-i', 'pipe:0',
+    '-vn',
+    '-acodec', 'libmp3lame',
+    '-q:a', '0',
+    '-f', 'mp3',
+    'pipe:1',
+  ];
 
-  ytdlp.stdout.on('data', (chunk) => chunks.push(chunk));
+  const ytdlp = spawn('yt-dlp', ytdlpArgs);
+  const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+  ffmpeg.stdin.on('error', () => {}); // EPIPE si ffmpeg ya murió, el 'close' de abajo maneja el error real
+
+  let ytdlpExitCode = null;
 
   ytdlp.stderr.on('data', (data) => {
     console.error(`[yt-dlp] ${data.toString().trim()}`);
   });
 
+  ffmpeg.stderr.on('data', (data) => {
+    console.error(`[ffmpeg] ${data.toString().trim()}`);
+  });
+
   ytdlp.on('error', (err) => {
     console.error('Error al iniciar yt-dlp:', err.message);
+    ffmpeg.kill('SIGTERM');
+    cleanupWorkingCookies();
     if (!res.headersSent) {
       res.status(500).json({ error: 'No se pudo iniciar yt-dlp. Verifica que esté instalado.' });
     }
   });
 
-  ytdlp.on('close', (code) => {
-    console.log(`[${new Date().toISOString()}] Descarga completada. Código: ${code}, bytes: ${chunks.reduce((n, c) => n + c.length, 0)}`);
+  ffmpeg.on('error', (err) => {
+    console.error('Error al iniciar ffmpeg:', err.message);
+    ytdlp.kill('SIGTERM');
+    cleanupWorkingCookies();
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'No se pudo iniciar ffmpeg. Verifica que esté instalado.' });
+    }
+  });
 
+  ytdlp.on('close', (code) => {
+    ytdlpExitCode = code;
     if (code !== 0) {
-      if (!res.headersSent) {
-        res.status(500).json({ error: `yt-dlp terminó con código ${code}` });
-      }
-      return;
+      console.error(`[yt-dlp] Terminó con código ${code}`);
+    }
+  });
+
+  const chunks = [];
+
+  ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
+
+  ffmpeg.on('close', (ffmpegCode) => {
+    console.log(`[${new Date().toISOString()}] Descarga completada. yt-dlp: ${ytdlpExitCode}, ffmpeg: ${ffmpegCode}, bytes: ${chunks.reduce((n, c) => n + c.length, 0)}`);
+    cleanupWorkingCookies();
+
+    if (res.headersSent) return;
+
+    if (ytdlpExitCode !== null && ytdlpExitCode !== 0) {
+      return res.status(500).json({ error: `yt-dlp terminó con código ${ytdlpExitCode}` });
+    }
+
+    if (ffmpegCode !== 0) {
+      return res.status(500).json({ error: `ffmpeg terminó con código ${ffmpegCode}` });
     }
 
     const buffer = Buffer.concat(chunks);
 
     if (buffer.length === 0) {
-      return res.status(500).json({ error: 'yt-dlp no generó audio. Revisa la URL.' });
+      return res.status(500).json({ error: 'No se generó audio. Revisa la URL.' });
     }
 
     res.setHeader('Content-Type', 'audio/mpeg');
@@ -75,6 +145,7 @@ function download(req, res) {
     if (!res.writableEnded) {
       console.log(`[${new Date().toISOString()}] Cliente desconectado, cancelando descarga`);
       ytdlp.kill('SIGTERM');
+      ffmpeg.kill('SIGTERM');
     }
   });
 }

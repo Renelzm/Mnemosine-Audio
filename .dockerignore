@@ -4,3 +4,11 @@ node_modules
 .gitignore
 .dockerignore
 *.md
+.env
+.env.*
+*.log
+
+# Cookies de sesión: nunca deben quedar horneadas en la imagen
+cookies.txt
+*cookies*.txt
+/cookies/
