@@ -108,7 +108,22 @@ Tres fuentes, en orden de prioridad: `body.cookiesB64` → `body.cookies` → he
 
 **Preferir base64.** `src/lib/cookies.js` re-tabula el archivo porque el formato Netscape exige TABs y al viajar como texto dentro de un JSON se convierten en espacios; yt-dlp entonces ignora las líneas **en silencio** y el archivo parece válido pero va vacío. El normalizador también fuerza la línea de cabecera y preserva el prefijo `#HttpOnly_` (es dominio, no comentario).
 
-**Las cookies rotan y mueren.** El síntoma `The provided YouTube account cookies are no longer valid` aparece cuando el navegador que las exportó siguió activo y las rotó. Para que duren: ventana privada → login → dejar una sola pestaña → ir a `youtube.com/robots.txt` → exportar → **cerrar la ventana sin hacer logout**. Usar el mismo archivo desde dos IPs a la vez (tu PC y el server) también las mata más rápido.
+**Las cookies rotan y mueren.** El síntoma `The provided YouTube account cookies are no longer valid` aparece cuando **algo más** sigue usando la misma sesión y avanza la cadena de rotación por su lado. El uso regular por un solo dueño no las mata — al contrario, las mantiene vivas; lo que las mata es la competencia.
+
+### Runbook: renovar cookies
+
+En producción viven en la Data Table **`Config`** de n8n (fila `clave=cookiesB64`), que el workflow `kOUETMqgQwi6P3Rz` lee y manda en el body. El mismo runbook está pegado como Sticky Note en ese canvas.
+
+1. Ventana de incógnito → login con la **cuenta dedicada** (nunca la personal: automatizar con cookies viola los ToS de YouTube).
+2. Dejar **una sola pestaña** → ir a `youtube.com/robots.txt` (no dispara rotación).
+3. Exportar con la extensión "Get cookies.txt LOCALLY".
+4. **Cerrar la ventana sin hacer logout** — el logout invalida la sesión al instante.
+5. Verificar **antes** de tocar n8n: `.\scripts\probar-cookies.ps1 -CookiesPath "...\cookies.txt"`. Manda `verbose:true` y distingue "cookie muerta" (`cookiesStale: true`) de "IP bloqueada" (`cookiesStale: false` con `LOGIN_REQUIRED`).
+6. `[Convert]::ToBase64String([IO.File]::ReadAllBytes('...\cookies.txt')) | Set-Clipboard` y pegar en la columna `valor` de la Data Table.
+
+No reabrir YouTube en ese navegador con esa cuenta: eso bifurca la cadena y mata la copia guardada.
+
+**Pendiente conocido:** hoy la rotación se descarta. `resolveCookies()` copia a un temporal y `cleanup()` lo borra — con las cookies rotadas que yt-dlp escribió dentro. Persistir ese temporal (con un candado que serialice los requests, o dos descargas concurrentes bifurcan la cadena y matan ambas ramas) convertiría la vida de la sesión de días a meses. Requiere un volumen escribible en Coolify.
 
 **Nunca commitear ni copiar a la imagen ningún `*cookies*.txt`** — son credenciales de sesión y quedarían extraíbles de la capa de Docker. Ya están cubiertas por `.gitignore` y `.dockerignore`; se inyectan solo en runtime. Hay un `www.youtube.com_cookies (1).txt` sin trackear en el repo para pruebas locales: no lo agregues a git.
 
