@@ -37,6 +37,9 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Healthcheck: que Coolify sepa si el contenedor de verdad responde, no solo si arrancó.
-HEALTHCHECK --interval=60s --timeout=10s --start-period=15s --retries=3 CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+# El puerto se lee de $PORT en runtime, NO se hardcodea: Coolify inyecta su propia PORT segun el
+# ajuste "Ports Exposes" de la app y pisa el ENV de arriba. Hardcodear 8080 hizo que el healthcheck
+# golpeara un puerto donde nadie escuchaba y Coolify abortara el deploy con la app perfectamente sana.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/health" || exit 1
 
 CMD ["node", "server.js"]
