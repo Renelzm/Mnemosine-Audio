@@ -1,61 +1,62 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const { allowedDomains, cookiesPath } = require('../config');
+const { allowedDomains, cookiesPath, remoteComponents, playerClients, jsRuntime, apiToken } = require('../config');
+const { resolveCookies } = require('../lib/cookies');
+const { classify, summarize } = require('../lib/ytdlp-errors');
+
+const VERSION = '2.0';
 
 function isAllowedUrl(url) {
   try {
-    const { hostname } = new URL(url);
-    return allowedDomains.includes(hostname);
+    const { hostname, protocol } = new URL(url);
+    return (protocol === 'http:' || protocol === 'https:') && allowedDomains.includes(hostname);
   } catch {
     return false;
   }
 }
 
+function fail(res, status, code, error, extra = {}) {
+  if (res.headersSent) return;
+  res.status(status).json({ ok: false, code, error, ...extra });
+}
+
 function download(req, res) {
-  const { url } = req.body;
+  const startedAt = Date.now();
+
+  if (apiToken && req.headers['x-api-token'] !== apiToken) {
+    return fail(res, 401, 'UNAUTHORIZED', 'Falta o es invalido el header X-Api-Token.');
+  }
+
+  const { url } = req.body || {};
 
   if (!url) {
-    return res.status(400).json({ error: 'Se requiere el campo "url"' });
+    return fail(res, 400, 'MISSING_URL', 'Se requiere el campo "url".');
   }
 
   if (!isAllowedUrl(url)) {
-    return res.status(400).json({ error: 'URL no permitida. Solo se aceptan URLs de YouTube y Facebook.' });
+    return fail(res, 400, 'DOMAIN_NOT_ALLOWED', 'URL no permitida. Solo se aceptan URLs de YouTube y Facebook.', { allowedDomains });
   }
 
-  console.log(`[${new Date().toISOString()}] Descargando audio de: ${url}`);
+  const cookies = resolveCookies(req);
 
-  const hasCookies = fs.existsSync(cookiesPath);
-
-  // yt-dlp intenta reescribir el cookies.txt al cerrar (para persistir cookies rotadas).
-  // El File Mount de Coolify puede ser de solo lectura, y aunque no lo sea, no queremos que
-  // yt-dlp modifique el archivo "fuente de verdad" configurado ahí. Por eso se usa una copia
-  // temporal y escribible por request en vez de apuntar directo al cookiesPath montado.
-  let workingCookiesPath = null;
-  if (hasCookies) {
-    workingCookiesPath = path.join(os.tmpdir(), `cookies-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
-    fs.copyFileSync(cookiesPath, workingCookiesPath);
+  if (cookies.error) {
+    return fail(res, 400, 'COOKIES_MALFORMED', cookies.error, {
+      cookiesSource: cookies.source,
+      hint: 'Manda el archivo en base64 en "cookiesB64": los TABs del formato Netscape se pierden al viajar como texto dentro de un JSON.',
+    });
   }
 
-  console.log(hasCookies
-    ? `[yt-dlp] Usando cookies de sesión: ${cookiesPath}`
-    : `[yt-dlp] Sin cookies (no se encontró ${cookiesPath}); YouTube puede bloquear la descarga`);
+  console.log(`[${new Date().toISOString()}] Descargando: ${url} | cookies: ${cookies.source} (${cookies.count})`);
 
-  const cleanupWorkingCookies = () => {
-    if (workingCookiesPath) {
-      fs.unlink(workingCookiesPath, () => {});
-    }
-  };
-
-  // yt-dlp solo extrae el mejor audio original (opus/webm, etc.) y lo manda por stdout.
-  // La conversión real a mp3 la hace ffmpeg en un segundo proceso encadenado: al mandar
-  // a stdout ('-o -'), el postprocesador de yt-dlp (-x/--audio-format) no se aplica.
   const ytdlpArgs = [
-    '-f', 'bestaudio',
+    '-f', 'bestaudio/best',
     '--no-playlist',
-    '--js-runtimes', 'deno:/usr/local/bin/deno',
-    ...(hasCookies ? ['--cookies', workingCookiesPath] : []),
+    '--no-progress',
+    '--socket-timeout', '30',
+    '--js-runtimes', jsRuntime,
+    ...(remoteComponents ? ['--remote-components', remoteComponents] : []),
+    ...(playerClients ? ['--extractor-args', `youtube:player_client=${playerClients}`] : []),
+    ...(cookies.path ? ['--cookies', cookies.path] : []),
     '-o', '-',
     url,
   ];
@@ -74,70 +75,98 @@ function download(req, res) {
   const ffmpeg = spawn('ffmpeg', ffmpegArgs);
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
-  ffmpeg.stdin.on('error', () => {}); // EPIPE si ffmpeg ya murió, el 'close' de abajo maneja el error real
+  ffmpeg.stdin.on('error', () => {}); // EPIPE si ffmpeg ya murio; el close de abajo da el error real
 
+  let ytdlpStderr = '';
+  let ffmpegStderr = '';
   let ytdlpExitCode = null;
+  let spawnFailure = null;
 
   ytdlp.stderr.on('data', (data) => {
-    console.error(`[yt-dlp] ${data.toString().trim()}`);
+    const text = data.toString();
+    ytdlpStderr += text;
+    console.error(`[yt-dlp] ${text.trim()}`);
   });
 
   ffmpeg.stderr.on('data', (data) => {
-    console.error(`[ffmpeg] ${data.toString().trim()}`);
+    const text = data.toString();
+    ffmpegStderr += text;
+    console.error(`[ffmpeg] ${text.trim()}`);
   });
 
   ytdlp.on('error', (err) => {
-    console.error('Error al iniciar yt-dlp:', err.message);
+    spawnFailure = { code: 'YTDLP_NOT_INSTALLED', message: `No se pudo iniciar yt-dlp: ${err.message}` };
     ffmpeg.kill('SIGTERM');
-    cleanupWorkingCookies();
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'No se pudo iniciar yt-dlp. Verifica que esté instalado.' });
-    }
   });
 
   ffmpeg.on('error', (err) => {
-    console.error('Error al iniciar ffmpeg:', err.message);
+    spawnFailure = { code: 'FFMPEG_NOT_INSTALLED', message: `No se pudo iniciar ffmpeg: ${err.message}` };
     ytdlp.kill('SIGTERM');
-    cleanupWorkingCookies();
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'No se pudo iniciar ffmpeg. Verifica que esté instalado.' });
-    }
   });
 
   ytdlp.on('close', (code) => {
     ytdlpExitCode = code;
-    if (code !== 0) {
-      console.error(`[yt-dlp] Terminó con código ${code}`);
-    }
   });
 
+  // El audio se acumula en memoria en vez de pipearse directo a la respuesta: asi se conocen los
+  // codigos de salida de ambos procesos ANTES de mandar headers, y un fallo devuelve un JSON de
+  // error limpio en lugar de un 200 con un stream truncado. Costo: RAM ~= tamano del mp3.
   const chunks = [];
-
-  ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
+  let bytes = 0;
+  ffmpeg.stdout.on('data', (chunk) => {
+    chunks.push(chunk);
+    bytes += chunk.length;
+  });
 
   ffmpeg.on('close', (ffmpegCode) => {
-    console.log(`[${new Date().toISOString()}] Descarga completada. yt-dlp: ${ytdlpExitCode}, ffmpeg: ${ffmpegCode}, bytes: ${chunks.reduce((n, c) => n + c.length, 0)}`);
-    cleanupWorkingCookies();
+    const ms = Date.now() - startedAt;
+    console.log(`[${new Date().toISOString()}] Fin. yt-dlp: ${ytdlpExitCode}, ffmpeg: ${ffmpegCode}, bytes: ${bytes}, ${ms}ms`);
+    cookies.cleanup();
 
     if (res.headersSent) return;
 
-    if (ytdlpExitCode !== null && ytdlpExitCode !== 0) {
-      return res.status(500).json({ error: `yt-dlp terminó con código ${ytdlpExitCode}` });
+    if (spawnFailure) {
+      return fail(res, 500, spawnFailure.code, spawnFailure.message, {
+        hint: 'El contenedor no tiene la dependencia instalada. Revisa GET /diag y fuerza rebuild sin cache en Coolify.',
+      });
+    }
+
+    if (ytdlpExitCode !== 0) {
+      const verdict = classify(ytdlpStderr, ytdlpExitCode);
+      return fail(res, verdict.status, verdict.code, verdict.error, {
+        hint: verdict.hint,
+        retryable: verdict.retryable,
+        cookiesStale: verdict.cookiesStale,
+        refreshCookies: verdict.refreshCookies,
+        cookiesSource: cookies.source,
+        detail: summarize(ytdlpStderr),
+      });
     }
 
     if (ffmpegCode !== 0) {
-      return res.status(500).json({ error: `ffmpeg terminó con código ${ffmpegCode}` });
+      return fail(res, 502, 'TRANSCODE_FAILED', 'ffmpeg no pudo convertir el audio a mp3.', {
+        retryable: true,
+        detail: ffmpegStderr.trim().split('\n').slice(-4).join(' | ').slice(0, 1000),
+      });
+    }
+
+    if (bytes === 0) {
+      // yt-dlp y ffmpeg salieron en 0 pero no hubo audio: raro, pero mejor un error explicito que
+      // devolver un mp3 de 0 bytes que el cliente tomaria como exito.
+      return fail(res, 502, 'EMPTY_OUTPUT', 'No se genero audio aunque yt-dlp y ffmpeg terminaron bien.', {
+        retryable: true,
+        cookiesStale: classify(ytdlpStderr, 0).cookiesStale,
+        detail: summarize(ytdlpStderr),
+      });
     }
 
     const buffer = Buffer.concat(chunks);
-
-    if (buffer.length === 0) {
-      return res.status(500).json({ error: 'No se generó audio. Revisa la URL.' });
-    }
-
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Content-Disposition', 'attachment; filename="audio.mp3"');
     res.setHeader('Content-Length', buffer.length);
+    res.setHeader('X-Cookies-Source', cookies.source);
+    res.setHeader('X-Cookies-Stale', String(classify(ytdlpStderr, 0).cookiesStale));
+    res.setHeader('X-Duration-Ms', String(ms));
     res.end(buffer);
   });
 
@@ -146,12 +175,72 @@ function download(req, res) {
       console.log(`[${new Date().toISOString()}] Cliente desconectado, cancelando descarga`);
       ytdlp.kill('SIGTERM');
       ffmpeg.kill('SIGTERM');
+      cookies.cleanup();
     }
   });
 }
 
 function health(_req, res) {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.2' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), version: VERSION });
 }
 
-module.exports = { download, health };
+function probe(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: 15000 }, (err, stdout, stderr) => {
+      if (err) return resolve({ ok: false, error: (stderr || err.message).trim().split('\n')[0] });
+      resolve({ ok: true, out: (stdout || stderr).trim().split('\n')[0] });
+    });
+  });
+}
+
+/**
+ * Radiografia del contenedor que esta corriendo AHORA MISMO.
+ *
+ * Existe porque Coolify puede reusar una imagen vieja sin avisar ("Build step skipped") y no habia
+ * forma de saber que version de yt-dlp / deno / EJS quedo desplegada mas que provocando un fallo real.
+ */
+async function diag(_req, res) {
+  const denoBin = jsRuntime.includes(':') ? jsRuntime.slice(jsRuntime.indexOf(':') + 1) : 'deno';
+
+  const [ytdlp, deno, ffmpeg, ejs] = await Promise.all([
+    probe('yt-dlp', ['--version']),
+    probe(denoBin, ['--version']),
+    probe('ffmpeg', ['-version']),
+    probe('python3', ['-c', 'import importlib.metadata as m; print(m.version("yt-dlp-ejs"))']),
+  ]);
+
+  let mountedCookies;
+  try {
+    const stat = fs.statSync(cookiesPath);
+    let writable = false;
+    try {
+      fs.accessSync(cookiesPath, fs.constants.W_OK);
+      writable = true;
+    } catch {
+      writable = false;
+    }
+    mountedCookies = {
+      present: true,
+      path: cookiesPath,
+      bytes: stat.size,
+      modified: stat.mtime.toISOString(),
+      ageDays: Number(((Date.now() - stat.mtimeMs) / 86400000).toFixed(1)),
+      writable,
+    };
+  } catch {
+    mountedCookies = { present: false, path: cookiesPath };
+  }
+
+  res.json({
+    appVersion: VERSION,
+    timestamp: new Date().toISOString(),
+    ytdlp,
+    deno,
+    ffmpeg,
+    ytdlpEjs: ejs,
+    config: { remoteComponents, playerClients, jsRuntime, authRequired: Boolean(apiToken) },
+    mountedCookies,
+  });
+}
+
+module.exports = { download, health, diag };

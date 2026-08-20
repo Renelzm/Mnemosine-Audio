@@ -191,3 +191,47 @@ No se tocó porque es un problema aparte del pedido original (cookies + deploy).
 - Alternativas a futuro si las cookies se vuelven inestables: proxy residencial, o plugin `yt-dlp-get-pot` para PO tokens.
 - Falta confirmar si el warning de JS runtime (`deno`) afecta la calidad/disponibilidad de formatos una vez resuelto el bloqueo de login.
 - Pendiente decidir si se corrige el bug de conversión a MP3 (ver hallazgo arriba).
+
+---
+
+## 2026-08-20 (tarde): rediseño — cookies por request desde n8n + errores con código
+
+**Síntoma reportado desde n8n:** `500 - {"error":"yt-dlp terminó con código 1"}`. Un mensaje que no dice nada: no distingue "refresca las cookies" de "el video no existe" de "falta una dependencia en el contenedor".
+
+### Diagnóstico
+
+Los dos logs de producción eran **dos fallos distintos**, no uno:
+
+- **01:03Z** (= 19:03 local, *antes* del commit que agregó `yt-dlp-ejs`): `Remote components ... were skipped` → `n challenge solving failed` → `Only images are available` → `Requested format is not available`. Faltaba el solver EJS.
+- **14:36Z** (el que reportó el usuario): ni siquiera llega al reto JS. `cookies are no longer valid` → `Sign in to confirm you're not a bot`. **Cookies muertas.**
+
+Comprobado en local con el mismo `cookies.txt` del mount: `yt-dlp --cookies ... -F PFZh58z32m0` da **exactamente el mismo warning** de cookies rotadas — pero desde IP residencial YouTube lista todos los formatos igual y la descarga funciona. Confirmación de que el bloqueo es IP de datacenter + cookies muertas, no un bug del código.
+
+**Hallazgo colateral importante:** el yt-dlp local eligió el cliente `visionos`, que **no requiere reto JS ni PO tokens** — de ahí que funcione en Windows sin deno. Producción eligió `web embedded` / `tv`, que sí lo requieren. Forzar `player_client=default,visionos` esquiva todo el problema de deno/EJS por el camino corto.
+
+### Cambios
+
+**1. Cookies por request (`src/lib/cookies.js`, nuevo).** Prioridad `body.cookiesB64` → `body.cookies` → header `x-cookies-b64` → archivo montado. Refrescar cookies ya no requiere tocar Coolify ni redeploy: se actualizan en una variable de n8n.
+
+El normalizador **re-tabula** el archivo: el formato Netscape exige TABs y al viajar como texto dentro de un JSON se convierten en espacios; yt-dlp entonces ignora esas líneas **en silencio** (archivo válido, cero cookies dentro). Por eso base64 es la vía recomendada. También fuerza la cabecera `# Netscape HTTP Cookie File` y preserva `#HttpOnly_` (es prefijo de dominio, no comentario).
+
+**2. Errores clasificados (`src/lib/ytdlp-errors.js`, nuevo).** El stderr de yt-dlp se traduce a un `code` estable + status HTTP + flags `retryable` / `cookiesStale` / `refreshCookies`, y se devuelve el stderr real en `detail`. Ojo: el apóstrofe de `Sign in to confirm you’re not a bot` es **U+2019, no ASCII** — el regex usa `you.re`.
+
+**3. `--remote-components ejs:github`** como cinturón extra sobre el pip `yt-dlp-ejs`, que en producción no bastó. Y `--extractor-args youtube:player_client=default,visionos` para evitar el reto JS de entrada. Ambos configurables por env (`REMOTE_COMPONENTS`, `PLAYER_CLIENTS`).
+
+**4. `GET /diag`.** Devuelve las versiones reales de yt-dlp / deno / ffmpeg / yt-dlp-ejs del contenedor **vivo**, más edad y permisos del cookies.txt montado. Nace del problema del "Build step skipped": hasta ahora no había forma de saber qué quedó desplegado más que provocar un fallo real y leer el log.
+
+**5. `-f bestaudio/best`** (antes solo `bestaudio`, que fallaba en seco cuando el mejor formato no estaba disponible), `HEALTHCHECK` en el Dockerfile, y `API_TOKEN` opcional.
+
+### Probado en local
+
+- Descarga completa con cookies en el body (`PFZh58z32m0`): HTTP 200, 32.7 MB, `ffprobe` → `mp3 (mp3float)`, 19:14 de duración. Header `X-Cookies-Stale: true` — detectó las cookies rotadas **aunque la descarga funcionó**, que es justo la señal para refrescarlas antes de que empiece a fallar.
+- Las tres fuentes de cookies verificadas end-to-end: `request:cookiesB64`, `request:cookies`, `file:...` — mismo resultado, y sin temporales huérfanos en tmp.
+- Clasificador probado contra el texto literal de los logs de producción: bot check → `401 BOT_CHECK refreshCookies:true`; EJS faltante → `502 JS_CHALLENGE_FAILED`; video caído → `404 VIDEO_UNAVAILABLE`.
+- **No verificado:** que el bot check de la IP de Oracle se resuelva. Eso es imposible de reproducir desde IP residencial y solo se confirma en producción, con cookies frescas.
+
+### Lo que falta y lo que sigue
+
+- **Las cookies siguen siendo el punto frágil.** Rotan porque el navegador que las exportó siguió activo. Procedimiento para que duren: ventana privada → login → dejar una sola pestaña → ir a `youtube.com/robots.txt` → exportar → **cerrar la ventana sin logout**. Usar el mismo archivo desde dos IPs (PC + server) también las mata más rápido.
+- **Solución de fondo pendiente:** provider de PO tokens (`bgutil-ytdlp-pot-provider`) como sidecar. Permite descargar desde IP de datacenter **sin cookies de cuenta**, lo que elimina de raíz la rotación y el riesgo de ToS/suspensión de la cuenta personal.
+- **El endpoint es HTTP plano y sin auth.** Mandar cookies de sesión en el body sobre `http://` las expone en claro, y hoy cualquiera que conozca la URL puede descargar usando la cuenta de YouTube del usuario. Activar HTTPS en Coolify y definir `API_TOKEN`.

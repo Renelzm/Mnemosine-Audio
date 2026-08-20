@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(gcloud --version)",
+      "Bash(gcloud auth *)",
+      "Bash(gcloud config *)",
+      "Bash(gcloud projects *)"
     ]
   }
 }
