@@ -27,7 +27,10 @@ COPY . .
 # yt-dlp se instala DESPUES de copiar el código (capa que cambia en cada redeploy) para que
 # siempre jale la versión más reciente en vez de reusar una versión vieja cacheada por Docker.
 # YouTube cambia sus bloqueos anti-bot seguido y una versión desactualizada puede volver a fallar.
-RUN pip3 install --break-system-packages -U yt-dlp && yt-dlp --version
+# yt-dlp-ejs trae el script que resuelve los retos JS de YouTube con deno; el ejecutable
+# oficial (win_exe, el que usa el usuario en su PC) lo trae empaquetado, pero pip no.
+# Sin esto, yt-dlp intenta bajarlo al vuelo en cada run y falla con "Only images are available".
+RUN pip3 install --break-system-packages -U yt-dlp yt-dlp-ejs && yt-dlp --version
 
 ENV PORT=8080
 

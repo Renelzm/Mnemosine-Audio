@@ -141,17 +141,36 @@ El código forzaba `--js-runtimes node:/usr/local/bin/node`, pero **`node` no es
 
 **Verificado:** local (yt-dlp directo con deno) y con Docker real (build + run, mount `:ro`) contra `PFZh58z32m0`: sin warning de cookies inválidas, sin warning de JS runtime, sin bloqueo de bot. HTTP 200, mp3 válido de 32.7 MB.
 
+### Segundo redeploy: cookies frescas resolvieron el bloqueo de bot, pero apareció un 3er problema — faltaba `yt-dlp-ejs`
+
+Con deno ya funcionando (confirmado: ya no salía el warning de JS runtime) y cookies re-exportadas frescas en el File Mount, `PFZh58z32m0` seguía fallando, pero con un error nuevo:
+```
+[youtube] [jsc:deno] Solving JS challenges using deno
+WARNING: [youtube] [jsc] Remote components challenge solver script (deno) and NPM package (deno) were skipped...
+WARNING: [youtube] PFZh58z32m0: n challenge solving failed: Some formats may be missing...
+WARNING: Only images are available for download. use --list-formats to see them
+ERROR: [youtube] PFZh58z32m0: Requested format is not available.
+```
+Causa: deno como runtime ya corre, pero yt-dlp necesita además el **script que resuelve el reto JS** (paquete `yt-dlp-ejs` en PyPI). El ejecutable oficial de Windows (`win_exe`, el que usa el usuario en su PC) lo trae empaquetado; nuestra instalación vía `pip3 install yt-dlp` no. Sin él, yt-dlp intenta bajarlo al vuelo y lo salta por defecto, dejando solo miniaturas de imagen disponibles (sin audio/video real).
+
+**Fix (`Dockerfile`):**
+```dockerfile
+RUN pip3 install --break-system-packages -U yt-dlp yt-dlp-ejs && yt-dlp --version
+```
+
+**Verificado con Docker real** (`docker build --no-cache` + `docker run`, mount `:ro`, cookies frescas): HTTP 200, 32.7 MB, mp3 válido, sin ningún warning — solo la línea informativa `[jsc:deno] Solving JS challenges using deno`.
+
 ### Listo para redeploy
 
-Con todos estos fixes (cookies wireadas, mp3 real vía ffmpeg, yt-dlp siempre actualizado, a prueba de mount read-only, y deno instalado), todo quedó verificado con Docker real corriendo localmente. Pendiente: commitear y hacer **Force Rebuild sin caché** en Coolify (no un Redeploy normal), y repetir la prueba con `PFZh58z32m0` ya en producción.
+Con todos estos fixes (cookies wireadas, mp3 real vía ffmpeg, yt-dlp siempre actualizado, a prueba de mount read-only, deno instalado, y `yt-dlp-ejs`), todo quedó verificado con Docker real corriendo localmente. Pendiente: commitear y hacer **Force Rebuild sin caché** en Coolify (no un Redeploy normal), y repetir la prueba con `PFZh58z32m0` ya en producción.
 
 ### Pasos para el redeploy a producción
 
 1. Commitear estos cambios de código (**nunca** el `www.youtube.com_cookies.txt`, ya está en `.gitignore`).
-2. Confirmar en Coolify que el File Mount sigue en `/data/cookies/cookies.txt` con un cookies.txt fresco (re-exportar si tiene más de unos días).
+2. Confirmar en Coolify que el File Mount sigue en `/data/cookies/cookies.txt` con un cookies.txt fresco (re-exportar si tiene más de unos días — YA se hizo el 2026-08-20).
 3. **Force Rebuild sin caché** (no un Redeploy normal — el Dockerfile cambió y Coolify puede reusar una imagen vieja si no se fuerza).
 4. Probar en el Terminal del contenedor: `cat /data/cookies/cookies.txt` (confirmar que el mount sigue ahí) y luego pegarle al endpoint real con el video que antes fallaba (`PFZh58z32m0`).
-5. Revisar logs de la app: debe aparecer `[yt-dlp] Usando cookies de sesión: /data/cookies/cookies.txt`.
+5. Revisar logs de la app: debe aparecer `[yt-dlp] Usando cookies de sesión: /data/cookies/cookies.txt` y `[jsc:deno] Solving JS challenges using deno`, sin warnings de "cookies no longer valid" ni "Remote components ... skipped".
 
 ## ⚠️ Hallazgo nuevo (no relacionado a cookies): el audio no se convierte a MP3 real
 
