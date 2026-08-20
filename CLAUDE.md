@@ -118,8 +118,8 @@ En producción viven en la Data Table **`Config`** de n8n (fila `clave=cookiesB6
 2. Dejar **una sola pestaña** → ir a `youtube.com/robots.txt` (no dispara rotación).
 3. Exportar con la extensión "Get cookies.txt LOCALLY".
 4. **Cerrar la ventana sin hacer logout** — el logout invalida la sesión al instante.
-5. Verificar **antes** de tocar n8n: `.\scripts\probar-cookies.ps1 -CookiesPath "...\cookies.txt"`. Manda `verbose:true` y distingue "cookie muerta" (`cookiesStale: true`) de "IP bloqueada" (`cookiesStale: false` con `LOGIN_REQUIRED`).
-6. `[Convert]::ToBase64String([IO.File]::ReadAllBytes('...\cookies.txt')) | Set-Clipboard` y pegar en la columna `valor` de la Data Table.
+5. `.\scripts\probar-cookies.ps1 -CookiesPath "...\cookies.txt"` — verifica contra producción **y** deja el base64 en el portapapeles, pero solo si la prueba pasó: así no hay forma de pegar en n8n unas cookies sin verificar. Si falla, distingue "cookie muerta" (`cookiesStale: true`) de "IP bloqueada" (`cookiesStale: false` con `LOGIN_REQUIRED`) y guarda el log verbose.
+6. Pegar en la columna `valor` de la Data Table.
 
 No reabrir YouTube en ese navegador con esa cuenta: eso bifurca la cadena y mata la copia guardada.
 

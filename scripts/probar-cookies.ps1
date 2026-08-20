@@ -72,9 +72,28 @@ if ($codigo -eq "200") {
   Move-Item -LiteralPath $tmpOut -Destination $OutFile -Force
   Write-Host "FUNCIONO. MP3 guardado en $OutFile ($([math]::Round($tam/1MB,1)) MB)" -ForegroundColor Green
   Write-Host ""
-  Write-Host "Siguiente paso: pega este mismo base64 en la fila 'cookiesB64' de la Data Table"
-  Write-Host "'Config' en n8n. Para copiarlo al portapapeles:"
-  Write-Host "  [Convert]::ToBase64String([IO.File]::ReadAllBytes('$CookiesPath')) | Set-Clipboard" -ForegroundColor Gray
+
+  # Se copia solo, y solo cuando la prueba paso: asi no hay forma de pegar en n8n unas cookies
+  # que no se verificaron. Set-Clipboard falla sin sesion interactiva, de ahi el try.
+  $copiado = $false
+  try {
+    $b64 | Set-Clipboard
+    $copiado = $true
+  } catch {
+    $copiado = $false
+  }
+
+  if ($copiado) {
+    Write-Host "Base64 copiado al portapapeles ($($b64.Length) caracteres)." -ForegroundColor Green
+  } else {
+    $resp = Join-Path ([IO.Path]::GetDirectoryName($PSCommandPath)) "..\cookies-base64.txt"
+    [IO.File]::WriteAllText($resp, $b64)
+    Write-Host "No se pudo usar el portapapeles. Base64 guardado en cookies-base64.txt" -ForegroundColor Yellow
+  }
+
+  Write-Host ""
+  Write-Host "Ultimo paso: en n8n abre la Data Table 'Config', fila clave = cookiesB64," -ForegroundColor Cyan
+  Write-Host "click en la celda 'valor', borra lo que haya y pega (Ctrl+V)." -ForegroundColor Cyan
   Remove-Item $tmpPayload -Force
   exit 0
 }
