@@ -58,6 +58,13 @@ function resolveCookies(req) {
   const noop = { path: null, source: 'none', count: 0, cleanup: () => {} };
 
   const body = req.body || {};
+
+  // Escape hatch de diagnóstico: unas cookies muertas son PEORES que ninguna — con cookies de
+  // cuenta inválidas yt-dlp toma un camino degradado y cae en el bloqueo anti-bot, mientras que
+  // sin cookies puede pasar limpio usando el cliente visionos. Sirve para saber si la IP está
+  // bloqueada de verdad o si solo son las cookies las que envenenan el request.
+  if (body.noCookies === true) return { ...noop, source: 'disabled' };
+
   let raw = null;
   let source = null;
 
